@@ -1,5 +1,6 @@
 import cv2
 import time
+from cv2 import threshold
 import numpy as np
 import torch
 import torch.nn
@@ -7,7 +8,7 @@ from torchvision import models, transforms
 import os, sys
 import traceback
 from PIL import Image
-
+from utils.opt import video_parse_opt
 
 def detector(inputs, model):
     #   Class labels for prediction
@@ -27,11 +28,23 @@ def detector(inputs, model):
     print(label)
     return label 
 
+def time_counter(start, minutes, seconds):
+    seconds = int(time.time() - start) - minutes * 60
+    if seconds >= 60:
+        minutes += 1
+        seconds = 0
+    mins = "%02d" %minutes
+    secs = "%02d" %seconds
+    return mins, secs
+
 
 if __name__ == '__main__':
-    video_path = 'video/snare.mp4'
-    model_path = 'model/classified_1012.pth'
-    save_path = 'output'
+
+    opt = video_parse_opt()
+
+    video_path = opt.video_path
+    model_path = opt.model_path
+    save_path = opt.save_path
 
     #   load model 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -57,12 +70,13 @@ if __name__ == '__main__':
 
     frameID = 0
     time_start = time.time()
-    seconds = 0
-    minutes = 0
-    doc_time = {'anus':False, 'blank':0,'cecum':False, 'forceps':False, 'snare':False, 'clip':False}
+    seconds, minutes = 0, 0
+    threshold = {'anus':False, 'blank':0,'cecum':False, 'forceps':False, 'snare':False, 'clip':False}
     frame_count = {'anus':0, 'blank':0,'cecum':0, 'forceps':0, 'snare':0, 'clip':0}
     frame_label = {'anus':0, 'blank':0,'cecum':0, 'forceps':0, 'snare':0, 'clip':0}
-    anus,cecum,forceps,snare,clip = 0,0,0,0,0
+    timer_label = {'anus':0, 'blank':0,'cecum':0, 'forceps':0, 'snare':0, 'clip':0}
+    # anus,cecum,forceps,snare,clip = 0,0,0,0,0
+    
     while cap.isOpened():
         try:
             ret, frame = cap.read()
@@ -71,17 +85,16 @@ if __name__ == '__main__':
             frame_copy = Image.fromarray(frame_copy)
             inputs = preprocess(frame_copy).unsqueeze(0).to(device)
             label = detector(inputs, model)
-            #   Time counter
-            seconds = int(time.time() - time_start) - minutes * 60
-            if seconds >= 60:
-                    minutes += 1
-                    seconds = 0
-            m = "%02d" %minutes
-            s = "%02d" %seconds
-            timestamp = "{}:{}".format(m,s)
+            
+            # Time counter 計算影片時長
+            mins, secs = time_counter(time_start, minutes, seconds)
+            timestamp = "{}:{}".format(mins, secs)
             cv2.putText(frame, timestamp, (100, 100), cv2.FONT_ITALIC, 
                             1, (255, 255, 255), 2, cv2.LINE_AA)
         
+            # 計算label連續出現的幀數，當沒有連貫時，幀數歸0
+            # frame_label 紀錄上一幀的位置
+            # frame_count 紀錄連續出現幾幀
             if frame_label[label]==0:
                 frame_label[label]=frameID
             elif frame_label[label] == frameID-1:
@@ -91,55 +104,33 @@ if __name__ == '__main__':
                 frame_count[label] = 0
                 frame_label[label] = 0
 
-            if doc_time[label]==False and frame_count[label]>60:
-                doc_time[label]=True
+            # 當特定label的幀數連續出現且達到閥值時，該label的閥門就會變成true
+            if threshold[label]==False and frame_count[label]>60: # threshold setting as 60 frames
+                threshold[label]=True
 
-            
-            if doc_time['cecum']==True:
-                cecum+=1
-                if cecum <= 600:
-                    text = '      cecum detected'
-                    cv2.putText(frame, text, (100, 100), cv2.FONT_ITALIC, 
-                            1, (127, 255, 0), 2, cv2.LINE_AA)
-                elif cecum > 600:
-                    doc_time['cecum']='Close'
-            elif doc_time['anus']==True:
-                anus+=1
-                if anus <= 600:
-                    text = '      anal detected'
-                    cv2.putText(frame, text, (100, 100), cv2.FONT_ITALIC, 
-                        1, (127, 255, 0), 2, cv2.LINE_AA)
-                elif anus > 600:
-                    doc_time['anus']='Close'
+            # 當閥門打開後，就會顯示偵測到該label
+            # 當顯示一定的時間後，閥門會在關閉
+            labels_key = threshold.keys()
+            for key in labels_key:
+                if threshold[key] == True:
+                    timer_label[key] = timer_label[key] + 1
+                    if key == 'cecum' or key == 'anus':
+                        if timer_label[key] <= 600:
+                            text = '      {} detected'.format(key)
+                            cv2.putText(frame, text, (100, 100), cv2.FONT_ITALIC, 
+                                        1, (127, 255, 0), 2, cv2.LINE_AA)
+                        elif timer_label[key] > 600:
+                            threshold[key]='Close'
+                    elif key == 'forceps' or key == 'snare' or key == 'clip':
+                        if timer_label[key] <= 600:
+                            text = '{} insert'.format(key)
+                            cv2.putText(frame, text, (100, 150), cv2.FONT_ITALIC, 
+                                        1, (127, 255, 0), 2, cv2.LINE_AA)
+                        elif timer_label[key] > 1200: #為了避免關閉閥門後 短時間的偵測造成閥門再次開啟 將閥門關閉時間拉長
+                            threshold[key] == False
 
-
-            if doc_time['forceps']==True:
-                forceps+=1
-                if forceps <= 600:
-                    text = 'forceps insert'
-                    cv2.putText(frame, text, (100, 150), cv2.FONT_ITALIC, 
-                            1, (127, 255, 0), 2, cv2.LINE_AA)
-                elif forceps > 1200:
-                    doc_time['forceps']=False
-            elif doc_time['snare']==True:
-                snare+=1
-                if snare <= 600:
-                    text = 'snare insert'
-                    cv2.putText(frame, text, (100, 150), cv2.FONT_ITALIC, 
-                            1, (127, 255, 0), 2, cv2.LINE_AA)
-                elif snare > 1200:
-                    doc_time['snare']=False
-            elif doc_time['clip']==True:
-                clip+=1
-                if clip <= 600:
-                    text = 'clip insert'
-                    cv2.putText(frame, text, (100, 150), cv2.FONT_ITALIC, 
-                            1, (127, 255, 0), 2, cv2.LINE_AA)
-                elif clip > 1200:
-                    doc_time['clip']=False
-            
             frameID += 1
-            # 寫入 影片
+            # 寫入影片
             out.write(frame)
             cv2.imshow('frame', frame)
             if cv2.waitKey(1) == ord('q'):
